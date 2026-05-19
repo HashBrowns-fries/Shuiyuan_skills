@@ -4,6 +4,7 @@ AI 回复草稿生成器 - MiniMax API
 """
 
 import json
+import os
 import logging
 from pathlib import Path
 import anthropic

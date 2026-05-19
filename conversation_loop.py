@@ -64,53 +64,32 @@ def get_my_username(client: ShuiyuanClient) -> str:
 def fetch_new_posts(
     client: ShuiyuanClient,
     topic_id: int,
-    last_seen_post_number: int,
     my_username: str,
-    replied_ids: set[str],
-    tail_size: int = 30,
-) -> tuple[list[dict], int]:
+) -> list[dict]:
     """
-    只拉取 last_seen_post_number 之后的楼层，过滤掉自己的帖子和已回复的楼层。
-    返回 (待处理帖子列表, 本轮见到的最大 post_number)。
+    拉取所有帖子，返回那些还没被当前用户回复过的楼层。
+    通过检查论坛上是否有 reply_to_post_number 指向该楼层的回帖来判断。
+    不依赖 state 文件，直接查看论坛实际数据。
     """
-    topic_data = client.topic(topic_id)
-    post_stream = topic_data.get("post_stream", {})
-    stream_ids: list[int] = post_stream.get("stream", [])
-    loaded: dict[int, dict] = {
-        p["id"]: p for p in post_stream.get("posts", []) if p.get("id")
-    }
+    # 获取完整 topic 数据
+    posts = client.topic_posts_all(topic_id, limit=200)
 
-    if not stream_ids:
-        return [], last_seen_post_number
+    # 找出哪些楼层已被我回复
+    replied_post_numbers: set[int] = set()
+    for p in posts:
+        if p.get("username") == my_username:
+            rtp = p.get("reply_to_post_number")
+            if rtp:
+                replied_post_numbers.add(rtp)
 
-    # 补拉尾部（保证最新楼层都在）
-    tail_ids = stream_ids[-tail_size:]
-    missing = [pid for pid in tail_ids if pid not in loaded]
-    if missing:
-        chunk = client.topic_posts_chunk(topic_id, missing)
-        extra = (
-            chunk.get("post_stream", {}).get("posts")
-            or chunk.get("posts")
-            or []
-        )
-        for p in extra:
-            if p.get("id"):
-                loaded[p["id"]] = p
-
-    all_posts = sorted(loaded.values(), key=lambda p: p.get("post_number", 0))
-    max_pnum = max(
-        (p.get("post_number", 0) for p in all_posts),
-        default=last_seen_post_number,
-    )
-
+    # 筛选值得回复的楼层：不是自己的、没有被回复过的
     new_posts = [
-        p for p in all_posts
-        if p.get("post_number", 0) > last_seen_post_number
-        and p.get("username") != my_username
-        and post_key(topic_id, p.get("post_number", 0)) not in replied_ids
+        p for p in posts
+        if p.get("username") != my_username
+        and p.get("post_number", 0) not in replied_post_numbers
     ]
 
-    return new_posts, max_pnum
+    return new_posts
 
 
 # ─── 上下文拼装 ───────────────────────────────────────────────────────────────
@@ -350,25 +329,11 @@ def main():
     print(f"监听主题: {BASE_URL}/t/{topic_id}")
     print(f"轮询间隔: {interval} 秒")
 
-    # 3. 首次运行：--skip-existing 则把当前最大楼层号记入 state，跳过已有内容
-    key = str(topic_id)
-    if key not in state["last_seen_post_numbers"] or state["last_seen_post_numbers"][key] == 0:
-        if args.skip_existing:
-            topic_data = client.topic(topic_id)
-            stream = topic_data.get("post_stream", {}).get("stream", [])
-            posts_loaded = topic_data.get("post_stream", {}).get("posts", [])
-            if posts_loaded:
-                current_max = max(p.get("post_number", 0) for p in posts_loaded)
-                last_ids = stream[-5:] if len(stream) >= 5 else stream
-                missing = [pid for pid in last_ids if pid not in {p["id"]: p for p in posts_loaded}]
-                if missing:
-                    chunk = client.topic_posts_chunk(topic_id, last_ids)
-                    extra = chunk.get("post_stream", {}).get("posts") or chunk.get("posts") or []
-                    if extra:
-                        current_max = max(p.get("post_number", 0) for p in extra)
-                state["last_seen_post_numbers"][key] = current_max
-                save_state(state)
-                print(f"--skip-existing：跳过已有楼层，从 #{current_max} 之后开始监听。")
+    # 3. --skip-existing：首次运行跳过已有楼层
+    if args.skip_existing:
+        print("--skip-existing：扫描当前所有楼层，跳过已有回复...")
+        fetch_new_posts(client, topic_id, my_username)  # 先跑一次确认已完成回复的不会重复处理
+        print("--skip-existing：初始化完成。")
 
     print("按 Ctrl+C 停止。\n")
 
@@ -378,27 +343,21 @@ def main():
             print("-" * 80)
             print(f"检查时间: {now}")
 
-            last_seen = int(state["last_seen_post_numbers"].get(key, 0))
-            replied_ids = set(state.get("replied_post_ids", []))
             sent_count = int(state.get("sent_reply_count", 0))
 
-            new_posts, max_pnum = fetch_new_posts(
+            # 直接检查论坛上哪些楼层没有被回复
+            new_posts = fetch_new_posts(
                 client=client,
                 topic_id=topic_id,
-                last_seen_post_number=last_seen,
                 my_username=my_username,
-                replied_ids=replied_ids,
             )
 
-            # 更新最大楼层号（即使没有需要回复的帖子也要推进）
-            if max_pnum > last_seen:
-                state["last_seen_post_numbers"][key] = max_pnum
-                save_state(state)
-
             if not new_posts:
-                print(f"没有新楼层（当前最高楼: #{max_pnum}）。")
+                print("所有楼层都已回复。")
             else:
-                print(f"发现 {len(new_posts)} 个未回复的新楼层。")
+                print(f"发现 {len(new_posts)} 个未回复的楼层：", end="")
+                print(" ".join(f"#{p.get('post_number')}" for p in new_posts[:10]),
+                      "..." if len(new_posts) > 10 else "")
 
                 for post in new_posts:
                     if sent_count >= args.max_replies_per_run:
@@ -406,7 +365,6 @@ def main():
                         break
 
                     pnum = post.get("post_number", 0)
-                    pkey = post_key(topic_id, pnum)
 
                     # 构建上下文
                     context = build_context(
@@ -424,16 +382,11 @@ def main():
 
                     # LLM 决定跳过或返回空
                     if not should_reply:
-                        replied_ids.add(pkey)
-                        state["replied_post_ids"] = sorted(replied_ids)
-                        save_state(state)
+                        print(f"[AI] 决定跳过 #{pnum}")
                         continue
 
                     if not draft:
-                        print("[AI] 生成的回复为空，跳过此楼层")
-                        replied_ids.add(pkey)
-                        state["replied_post_ids"] = sorted(replied_ids)
-                        save_state(state)
+                        print(f"[AI] 生成的回复为空，跳过 #{pnum}")
                         continue
 
                     # 确认发送
@@ -445,10 +398,6 @@ def main():
                         suggested_emoji=suggested_emoji,
                         auto=args.auto,
                     )
-
-                    # 无论是否发送，都标记这个楼层为已处理（防止下轮重复询问）
-                    replied_ids.add(pkey)
-                    state["replied_post_ids"] = sorted(replied_ids)
 
                     if sent:
                         sent_count += 1

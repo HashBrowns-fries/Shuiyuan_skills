@@ -269,26 +269,26 @@ class ShuiyuanClient:
         return self.post("/posts.json", data={"topic_id": topic_id, "raw": raw})
 
     def retort_post(self, post_id: int, emoji: str, remove: bool = False):
-        """贴/移除表情（需要 Cookie + CSRF）"""
+        """贴/移除表情（只用 Cookie + CSRF，不传 User-Api-Key）"""
+        import json as _json
         data: Dict[str, Any] = {"retort": emoji}
+        csrf = self.get_csrf_token()
+        url = self.url(f"/retorts/{post_id}")
+
         if remove:
-            # DELETE /retorts/:post_id with retort payload
-            headers = {"X-CSRF-Token": self.get_csrf_token(), "Content-Type": "application/json"}
             r = self.session.delete(
-                self.url(f"/retorts/{post_id}"),
-                headers=headers,
-                json=data,
+                url,
+                headers={"X-CSRF-Token": csrf, "Content-Type": "application/json"},
+                data=_json.dumps(data),
                 timeout=30,
             )
-            return self._handle_response(r)
-        # PUT /retorts/:post_id
-        headers = {"X-CSRF-Token": self.get_csrf_token(), "Content-Type": "application/json"}
-        r = self.session.put(
-            self.url(f"/retorts/{post_id}"),
-            headers=headers,
-            json=data,
-            timeout=30,
-        )
+        else:
+            r = self.session.put(
+                url,
+                headers={"X-CSRF-Token": csrf, "Content-Type": "application/json"},
+                data=_json.dumps(data),
+                timeout=30,
+            )
         return self._handle_response(r)
 
     def delete_post(self, post_id: int):

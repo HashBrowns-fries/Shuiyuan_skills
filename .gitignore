@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Auth & credentials (no commits!)
+auth/user_api_key.json
+auth/manual_cookie.json
+shuiyuan_cookies.json
+shuiyuan_user_api_key.json
+.shuiyuan_user_api_private.pem
+.shuiyuan_user_api_public.pem
+
+# Session state
+shuiyuan_user_api_state.json
+seen_topics.json
+
+# Env
+.env
+
+# Misc
+*.log
+.DS_Store

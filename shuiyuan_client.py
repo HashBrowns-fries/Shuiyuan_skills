@@ -259,7 +259,7 @@ class ShuiyuanClient:
         return all_actions[:limit]
 
     def create_topic(self, title: str, raw: str, category_id: int):
-        return self.post("/posts.json", data={"title": title, "raw": raw, "category": category_id})
+        return self.post("/posts.json", data={"title": title, "raw": raw, "category_id": category_id})
 
     def reply_topic(self, topic_id: int, raw: str):
         return self.post("/posts.json", data={"topic_id": topic_id, "raw": raw})

@@ -191,26 +191,44 @@ def fetch_topic_context(
     return "\n".join(lines)
 
 
-def build_reply_draft(notification: dict, context: str) -> str:
+def build_reply_draft(
+    notification: dict,
+    context: str,
+    auto: bool = False,
+) -> str:
     """
-    这里先用模板生成草稿。
-    如果你接入 LLM，可以把 notification + context 发给模型生成草稿，
-    但仍建议保留人工确认。
+    生成回复草稿。
+
+    如果接入 LLM，可以在这里调用：
+        draft = call_llm(notification, context)
+    但仍建议保留人工确认步骤（除非 --auto 模式）。
     """
     author = get_notification_author(notification)
+    post_number = notification.get("post_number")
+    type_name = notification_type_name(notification)
 
-    draft = f"""@{author} 谢谢回复，我看到了。
-
-我这边再补充一下：
-
-"""
-    return draft
+    if auto:
+        # 自动回复模式：更自然的草稿
+        if type_name == "replied":
+            draft = f"@{author} 谢谢回复！🐰"
+        elif type_name == "quoted":
+            draft = f"@{author} 引用收到～"
+        elif type_name == "mentioned":
+            draft = f"@{author} 被 tag 了！有什么事？"
+        else:
+            draft = f"@{author} 你好呀～"
+        return draft
+    else:
+        # 人工确认模式
+        return f"@{author} 谢谢回复，我看到了。\n\n我这边再补充一下：\n\n"
 
 
 def send_reply_confirmed(
     client: ShuiyuanClient,
     notification: dict,
     draft: str,
+    auto: bool = False,
+    retort_emoji: str | None = None,
 ):
     topic_id = notification.get("topic_id")
     post_number = notification.get("post_number")
@@ -228,30 +246,33 @@ def send_reply_confirmed(
     print(f"链接: {notification_url(notification)}")
     print("=" * 100)
 
-    print("\n回复草稿：")
-    print("=" * 100)
-    print(draft)
-    print("=" * 100)
+    if not auto:
+        print("\n回复草稿：")
+        print("=" * 100)
+        print(draft)
+        print("=" * 100)
 
-    edit = input("是否编辑草稿？输入 y 编辑，其他键直接进入确认：").strip().lower()
+        edit = input("是否编辑草稿？输入 y 编辑，其他键直接进入确认：").strip().lower()
 
-    if edit == "y":
-        print("请输入新的回复内容，输入 END 单独一行结束：")
-        lines = []
-        while True:
-            line = input()
-            if line.strip() == "END":
-                break
-            lines.append(line)
-        draft = "\n".join(lines).strip()
+        if edit == "y":
+            print("请输入新的回复内容，输入 END 单独一行结束：")
+            lines = []
+            while True:
+                line = input()
+                if line.strip() == "END":
+                    break
+                lines.append(line)
+            draft = "\n".join(lines).strip()
 
-    if not draft:
-        print("回复为空，已跳过。")
-        return False
+        if not draft:
+            print("回复为空，已跳过。")
+            return False
 
-    if not confirm_or_cancel("确认发送这条回复吗？", "确认发送"):
-        print("已取消发送。")
-        return False
+        if not confirm_or_cancel("确认发送这条回复吗？", "确认发送"):
+            print("已取消发送。")
+            return False
+    else:
+        print(f"\n自动回复：{draft}")
 
     data = {
         "topic_id": int(topic_id),
@@ -265,6 +286,16 @@ def send_reply_confirmed(
 
     print("回复已发送：")
     print(json.dumps(result, ensure_ascii=False, indent=2)[:2000])
+
+    # 自动贴表情
+    if retort_emoji:
+        try:
+            new_post_id = result.get("id")
+            if new_post_id:
+                client.retort_post(new_post_id, retort_emoji)
+                print(f"已贴表情: {retort_emoji}")
+        except Exception as e:
+            print(f"贴表情失败: {e}")
 
     return True
 
@@ -308,6 +339,17 @@ def main():
         "--once",
         action="store_true",
         help="只检查一次，不循环",
+    )
+
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="自动回复，不询问确认（跳过人工确认）",
+    )
+
+    parser.add_argument(
+        "--retort",
+        help="回复后自动贴的表情（如 heart, like）",
     )
 
     args = parser.parse_args()
@@ -388,12 +430,14 @@ def main():
                 print("\n最近上下文：")
                 print(context)
 
-                draft = build_reply_draft(n, context)
+                draft = build_reply_draft(n, context, auto=args.auto)
 
                 sent = send_reply_confirmed(
                     client=client,
                     notification=n,
                     draft=draft,
+                    auto=args.auto,
+                    retort_emoji=args.retort,
                 )
 
                 seen_ids.add(int(n["id"]))

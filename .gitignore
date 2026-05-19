@@ -20,10 +20,13 @@ shuiyuan_user_api_key.json
 shuiyuan_user_api_state.json
 seen_topics.json
 seen_notifications.json
+conversation_loop_state.json
 
 # Env
 .env
 
 # Misc
 *.log
+draft*.md
+post.md
 .DS_Store

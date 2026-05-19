@@ -142,6 +142,26 @@ python watch_replies.py --interval 180 --reply
 python watch_replies.py --types replied --reply
 ```
 
+### 发帖 + 持续监听回复（安全自动化）
+
+```bash
+# 发帖，然后持续监听这个主题的回复
+python conversation_loop.py \
+  --title "【机器兔来袭】之大家都来玩！" \
+  --category 35 \
+  --post-file post.md \
+  --interval 180
+
+# 只监听已有主题
+python conversation_loop.py --topic-id 475362 --interval 180
+
+# 监听所有回复/引用/提及
+python conversation_loop.py --all-topics --interval 180
+
+# 只检查一次（适合 cron）
+python conversation_loop.py --all-topics --once
+```
+
 ### 搜索帖子
 
 ```bash
@@ -285,6 +305,7 @@ python delete_post.py --post-id 987654
 | `browse_latest.py` | 浏览最新帖子，支持 `--unseen-only` | 读 |
 | `watch_latest.py` | 持续巡查新帖子 | 读 |
 | `watch_replies.py` | 监控回复/引用/提及通知 | 读 |
+| `conversation_loop.py` | 发帖→监听回复→确认发送的完整流程 | 读 / 写 |
 | `search_topics.py` | 搜索帖子 | 读 |
 | `read_topic.py` | 读取帖子内容 | 读 |
 | `query_summarize.py` | 通用查询与汇总，支持关键词或 topic id | 读 |
@@ -329,6 +350,7 @@ Shuiyuan_skills/
 ├── browse_latest.py
 ├── watch_latest.py
 ├── watch_replies.py
+├── conversation_loop.py
 ├── query_summarize.py
 ├── summarize_reply_confirmed.py
 ├── get_topic_posts.py

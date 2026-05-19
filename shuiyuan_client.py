@@ -69,6 +69,8 @@ class ShuiyuanClient:
 
     def _init_auth(self):
         """按优先级初始化认证"""
+        has_key = False
+
         # 1. 尝试 User-Api-Key
         key = os.getenv("SHUIYUAN_USER_API_KEY")
         client_id = os.getenv("SHUIYUAN_USER_API_CLIENT_ID", "shuiyuan-agent")
@@ -82,28 +84,30 @@ class ShuiyuanClient:
                 "User-Api-Client-Id": client_id,
             })
             self.auth_type = "user_api_key"
-            return
+            has_key = True
 
-        # 2. 尝试手动 Cookie
+        # 2. 同时加载 Cookie（retort 等操作需要 cookie auth）
+        self._load_cookies()
+
+        if not has_key and not self.session.cookies:
+            raise AuthError(
+                "未配置认证。请选择以下方式之一：\n"
+                "1. 配置 User-Api-Key：运行 python auth/user_api_key_auth.py\n"
+                "2. 手动复制 Cookie：运行 python auth/manual_cookie_auth.py"
+            )
+
+    def _load_cookies(self):
+        """加载 Cookie（可与 User-Api-Key 共存）"""
+        # 手动 Cookie
         cookies = load_manual_cookie()
         if cookies:
             self.session.cookies.update(cookies)
-            self.auth_type = "manual_cookie"
             return
 
-        # 3. 尝试旧版 Cookie 文件（兼容）
+        # 旧版 Cookie 文件
         cookie_file = Path("./shuiyuan_cookies.json")
         if cookie_file.exists():
             self._load_playwright_cookies(cookie_file)
-            self.auth_type = "legacy_cookie"
-            return
-
-        # 无认证
-        raise AuthError(
-            "未配置认证。请选择以下方式之一：\n"
-            "1. 配置 User-Api-Key：运行 python auth/user_api_key_auth.py\n"
-            "2. 手动复制 Cookie：运行 python auth/manual_cookie_auth.py"
-        )
 
     def _load_playwright_cookies(self, cookie_file: Path):
         """加载旧版 cookies 文件（兼容）"""
@@ -265,11 +269,27 @@ class ShuiyuanClient:
         return self.post("/posts.json", data={"topic_id": topic_id, "raw": raw})
 
     def retort_post(self, post_id: int, emoji: str, remove: bool = False):
-        """贴/移除表情"""
-        data: Dict[str, Any] = {"emoji": emoji}
+        """贴/移除表情（需要 Cookie + CSRF）"""
+        data: Dict[str, Any] = {"retort": emoji}
         if remove:
-            data["remove"] = True
-        return self.post(f"/posts/{post_id}/retort", data=data)
+            # DELETE /retorts/:post_id with retort payload
+            headers = {"X-CSRF-Token": self.get_csrf_token(), "Content-Type": "application/json"}
+            r = self.session.delete(
+                self.url(f"/retorts/{post_id}"),
+                headers=headers,
+                json=data,
+                timeout=30,
+            )
+            return self._handle_response(r)
+        # PUT /retorts/:post_id
+        headers = {"X-CSRF-Token": self.get_csrf_token(), "Content-Type": "application/json"}
+        r = self.session.put(
+            self.url(f"/retorts/{post_id}"),
+            headers=headers,
+            json=data,
+            timeout=30,
+        )
+        return self._handle_response(r)
 
     def delete_post(self, post_id: int):
         """删除回复"""

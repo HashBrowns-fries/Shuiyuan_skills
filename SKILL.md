@@ -7,12 +7,12 @@ description: 上海交大水源社区助手. USE WHEN shuiyuan, shuiyuan.sjtu.ed
 
 上海交大水源社区（shuiyuan.sjtu.edu.cn）助手。
 
-**工作目录:** `D:\Water\shuiyuan_agent\`（所有命令在此目录下执行）
+**工作目录:** `D:\Water\shuiyuan\`（所有命令在此目录下执行）
 
 ## 快速开始
 
 ```bash
-cd D:\Water\shuiyuan_agent
+cd D:\Water\shuiyuan
 
 # 1. 配置认证（选一种）
 python auth/user_api_key_auth.py   # 推荐：保存 User-Api-Key
@@ -48,7 +48,7 @@ python reply_confirmed.py <topic_id>
 python create_topic_confirmed.py
 
 # 贴表情
-python retort_post.py --post-id <id> --add <emoji_key>
+python retort_post.py <post_id> [emoji]
 ```
 
 ### 查询
@@ -94,7 +94,7 @@ client.delete_post(post_id)       # 删除回复
 | 回复帖子 | reply_confirmed.py （交互输入） |
 | 发帖 | create_topic_confirmed.py |
 | 查看分类 | list_categories.py |
-| 贴表情 | retort_post.py --post-id X --add emoji |
+| 贴表情 | retort_post.py <post_id> [emoji] |
 | 删除回复 | delete_post.py --post-id X |
 | 获取用户帖子 | get_user_posts.py username |
 

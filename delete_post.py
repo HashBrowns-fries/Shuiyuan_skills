@@ -37,13 +37,9 @@ def main():
         print("已取消，不删除。")
         return
 
-    # Discourse delete API: DELETE /posts/{id}.json
-    resp = client.session.delete(f"{client.base_url}/posts/{args.post_id}.json", timeout=30)
-
-    if resp.ok:
-        print("删除成功")
-    else:
-        print(f"删除失败: {resp.status_code} - {resp.text[:500]}")
+    result = client.delete_post(args.post_id)
+    print("删除成功")
+    print(result)
 
 
 if __name__ == "__main__":

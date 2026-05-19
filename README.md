@@ -1,128 +1,108 @@
-# Shuiyuan Agent
+# Shuiyuan
 
-上海交大水源社区（shuiyuan.sjtu.edu.cn）助手，基于 Discourse API。
+上海交大水源社区（shuiyuan.sjtu.edu.cn）CLI 工具集。
 
-**不依赖浏览器内核**，支持多种认证方式。
+不使用 Playwright / Selenium / Chromium 自动化登录。
+User-Api-Key 首次授权需要用户用浏览器手动完成一次授权，之后脚本通过 requests 调用 Discourse API。
 
-## 安装
-
-```bash
-pip install -r requirements.txt
-```
-
-## 认证方式
-
-### 方式 A：User-Api-Key（推荐）
+## 快速开始
 
 ```bash
-# 如果已有 key，直接保存
+cd shuiyuan
+
+# 配置认证
 python auth/user_api_key_auth.py
-# 或
-python user_api_key.py save --key "YOUR_KEY" --client-id "shuiyuan-agent"
 
-# 如果需要生成新 key
-python generate_api_key.py
+# 验证
+python list_categories.py
 ```
 
-### 方式 B：手动 Cookie
+## 认证
+
+| 方式 | 命令 |
+|------|------|
+| User-Api-Key（推荐） | `python auth/user_api_key_auth.py` |
+| 手动 Cookie | `python auth/manual_cookie_auth.py` |
+| 环境变量 | `SHUIYUAN_USER_API_KEY=xxx` |
+
+## 常用命令
 
 ```bash
-python auth/manual_cookie_auth.py
+# 浏览
+python browse_latest.py --count 10           # 最新帖子
+python query_summarize.py "招募"            # 搜索+汇总
+python search_topics.py "关键词"             # 搜索
+
+# 查看
+python read_topic.py <topic_id> --limit 5    # 帖子内容
+python list_categories.py                    # 分类
+python get_user_posts.py <username>         # 用户帖子
+
+# 交互操作（确认后执行）
+python reply_confirmed.py <topic_id>         # 回复
+python create_topic_confirmed.py            # 发帖
+python retort_post.py <post_id> [emoji]      # 贴表情
+python delete_post.py --post-id <id>        # 删除回复
 ```
 
-### 方式 C：环境变量
+## 贴表情流程
 
 ```bash
-export SHUIYUAN_USER_API_KEY=your-key
-export SHUIYUAN_USER_API_CLIENT_ID=shuiyuan-agent
-```
-
-## 常用脚本
-
-```bash
-# 看最新帖子
-python browse_latest.py --count 10 --unseen-only
-
-# 持续巡帖（每隔 5 分钟检查新帖）
-python watch_latest.py --interval 300 --count 20
-
-# 导出某主题所有 posts
-python get_topic_posts.py 123456 --output topic_123456.json
-
-# 获取某 post 的图片链接
-python get_post_imgs.py --post-id 987654
-
-# 获取 post 被贴的表情 / reaction / retort 信息
+# 1. 查看帖子有哪些表情可用
 python get_post_retorts.py --post-id 987654 --inspect
 
-# 统计某用户 emoji 使用
-python statistic_emoji_usage.py --username someone --limit 500
-
-# 获取某用户所有 posts
-python get_user_posts.py someone --limit 300 --output user_posts.json
-
-# 获取近半个月招募信息
-python newest_recruit.py --days 15
-
-# 汇总帖子并准备回复文件
-python summarize_reply_confirmed.py 123456 --prepare-reply reply.md
-
-# 人工确认后发送回复
-python summarize_reply_confirmed.py 123456 --reply-file reply.md --send
-
-# 通用查询-汇总（支持关键词或 topic_id）
-python query_summarize.py "招募"
-python query_summarize.py 475362
+# 2. 确认后贴表情（需输入"确认贴表情"）
+python retort_post.py 987654 heart
+python retort_post.py 987654 like --remove  # 移除
 ```
 
-## 脚本列表
+## 脚本索引
 
 | 脚本 | 功能 |
 |------|------|
-| `browse_latest.py` | 浏览最新帖子，支持 --unseen-only |
-| `watch_latest.py` | 持续巡查新帖子 |
-| `get_topic_posts.py` | 导出主题所有 posts |
-| `get_post_imgs.py` | 获取帖子图片链接 |
-| `get_post_votes.py` | 获取投票信息 |
-| `get_post_retorts.py` | 获取表情/reaction 信息 |
-| `get_user_posts.py` | 获取用户所有 posts |
-| `statistic_emoji_usage.py` | 统计用户 emoji 使用 |
-| `newest_recruit.py` | 获取招募类帖子 |
-| `summarize_reply_confirmed.py` | 汇总帖子 + 确认回复 |
-| `latest_topics.py` | 查看最新帖子列表 |
-| `list_categories.py` | 查看分类 |
-| `search_topics.py` | 搜索帖子 |
-| `read_topic.py` | 读取帖子内容 |
-| `reply_confirmed.py` | 回复帖子（确认后发送） |
-| `create_topic_confirmed.py` | 发布新帖（确认后发送） |
-| `query_summarize.py` | 通用查询-汇总脚本 |
-| `delete_post.py` | 删除回复 |
-| `retort_post.py` | 贴表情/反应 |
-| `generate_api_key.py` | 生成 User-Api-Key（需要浏览器） |
-| `user_api_key.py` | User-Api-Key 管理（auth-url/decrypt/save/test） |
+| browse_latest.py | 浏览最新帖子 |
+| watch_latest.py | 持续巡查新帖 |
+| query_summarize.py | 搜索+汇总（支持 topic_id 或关键词） |
+| search_topics.py | 搜索 |
+| read_topic.py | 读取帖子 |
+| list_categories.py | 分类列表 |
+| reply_confirmed.py | 回复（确认发送） |
+| create_topic_confirmed.py | 发帖（确认发送） |
+| get_user_posts.py | 用户帖子 |
+| get_topic_posts.py | 帖子所有回复 |
+| get_post_imgs.py | 帖子图片 |
+| get_post_retorts.py | 表情/reaction |
+| get_post_votes.py | 投票 |
+| statistic_emoji_usage.py | emoji 统计 |
+| newest_recruit.py | 招募帖 |
+| retort_post.py | 贴表情 |
+| delete_post.py | 删除回复 |
 
-## 环境变量
+## API Client
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `SHUIYUAN_BASE_URL` | `https://shuiyuan.sjtu.edu.cn` | 站点地址 |
-| `SHUIYUAN_USER_API_KEY` | - | 直接设置 API Key |
-| `SHUIYUAN_USER_API_CLIENT_ID` | `shuiyuan-agent` | API Client ID |
+```python
+from shuiyuan_client import ShuiyuanClient
+
+client = ShuiyuanClient()
+client.categories()
+client.latest_topics()
+client.search("关键词")
+client.topic(topic_id)
+client.topic_posts_all(topic_id)
+client.reply_topic(topic_id, raw)
+client.retort_post(post_id, emoji)      # 贴表情
+client.delete_post(post_id)             # 删除回复
+```
 
 ## 项目结构
 
 ```
-shuiyuan_agent/
-├── shuiyuan_client.py     # 核心 Client
-├── auth/
-│   ├── user_api_key_auth.py   # User-Api-Key 认证
-│   └── manual_cookie_auth.py  # 手动 Cookie 认证
-├── models/               # 数据模型
-│   ├── topic.py
-│   ├── search.py
-│   └── common.py
+shuiyuan/
+├── shuiyuan_client.py     # API Client
+├── auth/                   # 认证模块
+├── models/                 # 数据模型
 ├── browse_latest.py       # 浏览脚本
-├── watch_latest.py        # 巡帖脚本
-├── query_summarize.py     # 通用汇总脚本
+├── watch_latest.py         # 巡帖脚本
+├── query_summarize.py      # 查询汇总
 └── ...
 ```

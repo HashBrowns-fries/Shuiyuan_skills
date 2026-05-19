@@ -164,11 +164,13 @@ def main():
     print(f"Client ID: {result.client_id}")
     print(f"API Key: {result.payload.key}")
     print()
-    print("使用方式:")
-    print(f"  from shuiyuan_client import ShuiyuanClient")
-    print(f"  client = ShuiyuanClient(user_api_key='{result.payload.key}')")
+    print("建议保存到环境变量：")
+    print(f"export SHUIYUAN_USER_API_KEY='{result.payload.key}'")
+    print(f"export SHUIYUAN_USER_API_CLIENT_ID='{result.client_id}'")
     print()
-    print("建议将 API Key 保存到环境变量或配置文件中")
+    print("然后使用：")
+    print("from shuiyuan_client import ShuiyuanClient")
+    print("client = ShuiyuanClient()")
 
 
 if __name__ == "__main__":

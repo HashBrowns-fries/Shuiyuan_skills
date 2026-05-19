@@ -5,8 +5,9 @@
 ## Input
 
 - post_id：帖子 ID
-- emoji：表情名称（如 `like`, `heart`, `distorted_face`）
+- emoji：表情名称（如 `like`, `heart`）
 - `--remove`：移除表情
+- `--yes`：跳过确认
 
 ## Implementation
 
@@ -21,26 +22,28 @@ if not post.get("can_retort"):
     return
 
 # 贴表情
-url = f"{client.base_url}/posts/{post_id}/retort"
-data = {"emoji": emoji_name}
-resp = client.session.post(url, json=data, headers={"X-CSRF-Token": csrf})
+client.retort_post(post_id, emoji_name)
 ```
 
-## Examples
+## Workflow
 
-```bash
-# 查看当前帖子有哪些表情
-python retort_post.py 9033310
+1. 先查看帖子表情信息：
+   ```bash
+   python get_post_retorts.py --post-id <id> --inspect
+   ```
 
-# 贴一个表情
-python retort_post.py 9033310 distorted_face
+2. 确认后贴表情（需输入"确认贴表情"）：
+   ```bash
+   python retort_post.py <post_id> <emoji>
+   python retort_post.py <post_id> <emoji> --remove  # 移除
+   ```
 
-# 移除一个表情
-python retort_post.py 9033310 distorted_face --remove
-```
+3. 跳过确认（agent 使用）：
+   ```bash
+   python retort_post.py <post_id> <emoji> --yes
+   ```
 
 ## Notes
 
 - 只能贴自己已有的表情（在水源设置中添加的）
-- 不同站点的 emoji 列表可能不同
-- `my_retorts` 字段显示已贴的表情
+- 回复需要输入"确认贴表情"才会执行，agent 加 `--yes` 跳过

@@ -38,7 +38,12 @@ class ShuiyuanClient:
     3. 旧版 Cookie 文件（兼容）
     """
 
-    def __init__(self, base_url: str = BASE_URL):
+    def __init__(
+        self,
+        base_url: str = BASE_URL,
+        user_api_key: str | None = None,
+        user_api_client_id: str = "shuiyuan-agent",
+    ):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update(
@@ -50,7 +55,17 @@ class ShuiyuanClient:
         )
 
         self.auth_type = None
-        self._init_auth()
+
+        if user_api_key:
+            self.session.headers.update(
+                {
+                    "User-Api-Key": user_api_key,
+                    "User-Api-Client-Id": user_api_client_id,
+                }
+            )
+            self.auth_type = "user_api_key"
+        else:
+            self._init_auth()
 
     def _init_auth(self):
         """按优先级初始化认证"""
@@ -248,6 +263,18 @@ class ShuiyuanClient:
 
     def reply_topic(self, topic_id: int, raw: str):
         return self.post("/posts.json", data={"topic_id": topic_id, "raw": raw})
+
+    def retort_post(self, post_id: int, emoji: str, remove: bool = False):
+        """贴/移除表情"""
+        data: Dict[str, Any] = {"emoji": emoji}
+        if remove:
+            data["remove"] = True
+        return self.post(f"/posts/{post_id}/retort", data=data)
+
+    def delete_post(self, post_id: int):
+        """删除回复"""
+        result = self.post(f"/posts/{post_id}/destroy.json", data={"id": post_id})
+        return result
 
     @staticmethod
     def _handle_response(r: requests.Response):

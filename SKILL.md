@@ -37,8 +37,8 @@ python get_user_posts.py <username>         # 用户帖子
 python get_post_imgs.py --post-id <id>     # 图片链接
 python get_post_votes.py <topic_id>         # 投票
 python get_post_retorts.py --post-id <id> --inspect  # 表情信息
-python statistic_emoji_usage.py --username <u> --limit 500
 python newest_recruit.py --days 15
+python watch_replies.py --once                    # 监控回复通知
 ```
 
 ## 写操作（需确认）
@@ -76,6 +76,7 @@ client.post_by_id(post_id)
 |-----------|------|
 | 浏览最新帖子 | browse_latest.py --count 10 |
 | 持续巡帖 | watch_latest.py --interval 300 |
+| 监控回复 | watch_replies.py --once |
 | 搜索帖子 | search_topics.py "关键词" |
 | 汇总帖子 | query_summarize.py （交互输入） |
 | 回复帖子 | reply_confirmed.py （交互输入） |

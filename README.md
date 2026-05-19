@@ -126,6 +126,22 @@ python browse_latest.py --count 10 --unseen-only
 python watch_latest.py --interval 300 --count 20
 ```
 
+### 监控回复通知
+
+```bash
+# 只检查一次
+python watch_replies.py --once
+
+# 循环检查，每 3 分钟一次
+python watch_replies.py --interval 180
+
+# 发现新通知时询问是否回复
+python watch_replies.py --interval 180 --reply
+
+# 只看"回复"类型，不看引用和提及
+python watch_replies.py --types replied --reply
+```
+
 ### 搜索帖子
 
 ```bash
@@ -268,6 +284,7 @@ python delete_post.py --post-id 987654
 | `latest_topics.py` | 查看最新帖子列表 | 读 |
 | `browse_latest.py` | 浏览最新帖子，支持 `--unseen-only` | 读 |
 | `watch_latest.py` | 持续巡查新帖子 | 读 |
+| `watch_replies.py` | 监控回复/引用/提及通知 | 读 |
 | `search_topics.py` | 搜索帖子 | 读 |
 | `read_topic.py` | 读取帖子内容 | 读 |
 | `query_summarize.py` | 通用查询与汇总，支持关键词或 topic id | 读 |
@@ -311,6 +328,7 @@ Shuiyuan_skills/
 ├── shuiyuan_client.py
 ├── browse_latest.py
 ├── watch_latest.py
+├── watch_replies.py
 ├── query_summarize.py
 ├── summarize_reply_confirmed.py
 ├── get_topic_posts.py

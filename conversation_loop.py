@@ -18,21 +18,25 @@ NOTIFICATION_TYPES = {
 
 
 def load_state() -> dict:
+    defaults = {
+        "topic_id": None,
+        "seen_notification_ids": [],
+        "sent_reply_count": 0,
+        "replied_post_numbers": [],
+    }
+
     if not STATE_FILE.exists():
-        return {
-            "topic_id": None,
-            "seen_notification_ids": [],
-            "sent_reply_count": 0,
-        }
+        return defaults
 
     try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        # Ensure all keys exist
+        for k, v in defaults.items():
+            if k not in data:
+                data[k] = v
+        return data
     except Exception:
-        return {
-            "topic_id": None,
-            "seen_notification_ids": [],
-            "sent_reply_count": 0,
-        }
+        return defaults
 
 
 def save_state(state: dict):
@@ -286,6 +290,15 @@ def send_reply_confirmed(
 
     print("回复已发送：")
     print(json.dumps(result, ensure_ascii=False, indent=2)[:2000])
+
+    # 记录已回复的楼层
+    if post_number:
+        state = load_state()
+        replied = state.get("replied_post_numbers", [])
+        if post_number not in replied:
+            replied.append(int(post_number))
+            state["replied_post_numbers"] = replied
+            save_state(state)
 
     # 自动贴表情
     if retort_emoji:

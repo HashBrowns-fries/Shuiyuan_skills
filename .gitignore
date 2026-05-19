@@ -19,6 +19,7 @@ shuiyuan_user_api_key.json
 # Session state
 shuiyuan_user_api_state.json
 seen_topics.json
+seen_notifications.json
 
 # Env
 .env

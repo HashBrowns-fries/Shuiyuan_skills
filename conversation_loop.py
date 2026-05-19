@@ -1,3 +1,10 @@
+"""
+直接轮询帖子列表，回复所有未回复的新楼层。
+
+探测机制：直接轮询 /t/{topic_id}.json，不依赖 @提及/引用/通知，
+任何新楼层都能捕获。
+"""
+
 import argparse
 import json
 import time
@@ -6,35 +13,27 @@ from datetime import datetime
 
 from shuiyuan_client import BASE_URL, ShuiyuanClient
 from text_utils import html_to_text, shorten
-
+from ai_reply import build_ai_draft
 
 STATE_FILE = Path("./conversation_loop_state.json")
 
-NOTIFICATION_TYPES = {
-    "mentioned": 1,
-    "replied": 2,
-    "quoted": 3,
-}
 
+# ─── state ────────────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
     defaults = {
         "topic_id": None,
-        "seen_notification_ids": [],
+        "last_seen_post_numbers": {},   # {str(topic_id): int(post_number)}
+        "replied_post_ids": [],          # ["topic_id:post_number", ...]
         "sent_reply_count": 0,
-        "replied_post_numbers": [],
     }
-
     if not STATE_FILE.exists():
         return defaults
-
     try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        # Ensure all keys exist
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         for k, v in defaults.items():
-            if k not in data:
-                data[k] = v
-        return data
+            state.setdefault(k, v)
+        return state
     except Exception:
         return defaults
 
@@ -46,218 +45,193 @@ def save_state(state: dict):
     )
 
 
+def post_key(topic_id: int, post_number: int) -> str:
+    return f"{topic_id}:{post_number}"
+
+
+# ─── 用户身份 ──────────────────────────────────────────────────────────────────
+
+def get_my_username(client: ShuiyuanClient) -> str:
+    try:
+        data = client.current_user()
+        return data.get("current_user", {}).get("username", "")
+    except Exception:
+        return ""
+
+
+# ─── 拉取新楼层 ───────────────────────────────────────────────────────────────
+
+def fetch_new_posts(
+    client: ShuiyuanClient,
+    topic_id: int,
+    last_seen_post_number: int,
+    my_username: str,
+    replied_ids: set[str],
+    tail_size: int = 30,
+) -> tuple[list[dict], int]:
+    """
+    只拉取 last_seen_post_number 之后的楼层，过滤掉自己的帖子和已回复的楼层。
+    返回 (待处理帖子列表, 本轮见到的最大 post_number)。
+    """
+    topic_data = client.topic(topic_id)
+    post_stream = topic_data.get("post_stream", {})
+    stream_ids: list[int] = post_stream.get("stream", [])
+    loaded: dict[int, dict] = {
+        p["id"]: p for p in post_stream.get("posts", []) if p.get("id")
+    }
+
+    if not stream_ids:
+        return [], last_seen_post_number
+
+    # 补拉尾部（保证最新楼层都在）
+    tail_ids = stream_ids[-tail_size:]
+    missing = [pid for pid in tail_ids if pid not in loaded]
+    if missing:
+        chunk = client.topic_posts_chunk(topic_id, missing)
+        extra = (
+            chunk.get("post_stream", {}).get("posts")
+            or chunk.get("posts")
+            or []
+        )
+        for p in extra:
+            if p.get("id"):
+                loaded[p["id"]] = p
+
+    all_posts = sorted(loaded.values(), key=lambda p: p.get("post_number", 0))
+    max_pnum = max(
+        (p.get("post_number", 0) for p in all_posts),
+        default=last_seen_post_number,
+    )
+
+    new_posts = [
+        p for p in all_posts
+        if p.get("post_number", 0) > last_seen_post_number
+        and p.get("username") != my_username
+        and post_key(topic_id, p.get("post_number", 0)) not in replied_ids
+    ]
+
+    return new_posts, max_pnum
+
+
+# ─── 上下文拼装 ───────────────────────────────────────────────────────────────
+
+def build_context(
+    client: ShuiyuanClient,
+    topic_id: int,
+    around_post_number: int,
+    window: int = 6,
+    text_limit: int = 600,
+) -> str:
+    """
+    拉取 around_post_number 附近若干楼，拼成供 AI 阅读的上下文字符串。
+    """
+    topic_data = client.topic(topic_id)
+    title = topic_data.get("title", "")
+    stream_ids: list[int] = topic_data.get("post_stream", {}).get("stream", [])
+    loaded: dict[int, dict] = {
+        p["id"]: p
+        for p in topic_data.get("post_stream", {}).get("posts", [])
+        if p.get("id")
+    }
+
+    # 找到目标楼在 stream 中的位置，取前后各 window/2 个 ID
+    target_ids_near: list[int] = []
+    for i, pid in enumerate(stream_ids):
+        p = loaded.get(pid)
+        if p and p.get("post_number") == around_post_number:
+            start = max(0, i - window // 2)
+            end = min(len(stream_ids), i + window // 2 + 1)
+            target_ids_near = stream_ids[start:end]
+            break
+    if not target_ids_near:
+        target_ids_near = stream_ids[-window:]
+
+    # 补拉缺失
+    missing = [pid for pid in target_ids_near if pid not in loaded]
+    if missing:
+        chunk = client.topic_posts_chunk(topic_id, missing)
+        extra = (
+            chunk.get("post_stream", {}).get("posts")
+            or chunk.get("posts")
+            or []
+        )
+        for p in extra:
+            if p.get("id"):
+                loaded[p["id"]] = p
+
+    window_posts = sorted(
+        [loaded[pid] for pid in target_ids_near if pid in loaded],
+        key=lambda p: p.get("post_number", 0),
+    )
+
+    lines = [f"标题: {title}", f"链接: {BASE_URL}/t/{topic_id}", "=" * 80]
+    for p in window_posts:
+        pnum = p.get("post_number")
+        username = p.get("username")
+        created = p.get("created_at", "")
+        text = shorten(html_to_text(p.get("cooked", "")), text_limit)
+        marker = " ◀ 新楼层" if pnum == around_post_number else ""
+        lines.append(f"\n#{pnum} @{username} | {created}{marker}")
+        lines.append("-" * 60)
+        lines.append(text)
+
+    return "\n".join(lines)
+
+
+# ─── AI 草稿（MiniMax API）────────────────────────────────────────────────────
+
+def build_reply_draft(post: dict, context: str) -> tuple[bool, str, str]:
+    """
+    生成回复草稿。使用 MiniMax API 判断是否回复并生成内容。
+    返回 (should_reply, reply_text, emoji_name)。
+    """
+    author = post.get("username", "unknown")
+    post_number = post.get("post_number", "?")
+
+    print(f"[AI] 正在分析 #{post_number} @{author}...")
+
+    should_reply, reply, emoji, reason = build_ai_draft(context, "replied", author)
+
+    if should_reply and emoji:
+        print(f"[AI] 表情建议：:{emoji}:  原因：{reason}")
+    elif not should_reply:
+        print(f"[AI] 决定跳过：{reason}")
+
+    return should_reply, reply, emoji
+
+
+# ─── 确认并发送 ───────────────────────────────────────────────────────────────
+
 def confirm_or_cancel(prompt: str, confirm_text: str) -> bool:
     print(prompt)
     value = input(f'输入"{confirm_text}"继续：').strip()
     return value == confirm_text
 
 
-def create_topic_confirmed(
-    client: ShuiyuanClient,
-    title: str,
-    raw: str,
-    category_id: int,
-) -> int:
-    print("\n即将发布主题：")
-    print("=" * 100)
-    print(f"标题: {title}")
-    print(f"分类 ID: {category_id}")
-    print("-" * 100)
-    print(raw)
-    print("=" * 100)
-
-    if not confirm_or_cancel("确认发布这个主题吗？", "确认发帖"):
-        raise RuntimeError("已取消发帖。")
-
-    result = client.create_topic(
-        title=title,
-        raw=raw,
-        category_id=category_id,
-    )
-
-    topic_id = result.get("topic_id") or result.get("topic_slug") or result.get("id")
-
-    if not topic_id:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        raise RuntimeError("发帖成功但没有解析到 topic_id，请检查返回值。")
-
-    topic_id = int(topic_id)
-
-    print(f"主题已发布: {BASE_URL}/t/{topic_id}")
-    return topic_id
-
-
-def get_notifications(client: ShuiyuanClient):
-    data = client.get("/notifications.json")
-    return data.get("notifications", [])
-
-
-def notification_type_name(notification: dict) -> str:
-    ntype = notification.get("notification_type")
-    for name, value in NOTIFICATION_TYPES.items():
-        if value == ntype:
-            return name
-    return str(ntype)
-
-
-def get_notification_author(notification: dict) -> str:
-    data = notification.get("data") or {}
-    return (
-        data.get("display_username")
-        or data.get("username")
-        or data.get("original_username")
-        or data.get("mentioned_by_username")
-        or "unknown"
-    )
-
-
-def get_notification_title(notification: dict) -> str:
-    data = notification.get("data") or {}
-    return (
-        notification.get("fancy_title")
-        or data.get("topic_title")
-        or data.get("original_title")
-        or "无标题"
-    )
-
-
-def notification_url(notification: dict) -> str:
-    topic_id = notification.get("topic_id")
-    post_number = notification.get("post_number")
-
-    if not topic_id:
-        return BASE_URL
-
-    if post_number:
-        return f"{BASE_URL}/t/{topic_id}/{post_number}"
-
-    return f"{BASE_URL}/t/{topic_id}"
-
-
-def should_handle_notification(
-    notification: dict,
-    target_topic_id: int | None,
-    seen_ids: set[int],
-    include_all_topics: bool,
-) -> bool:
-    nid = notification.get("id")
-    if nid is None:
-        return False
-
-    if int(nid) in seen_ids:
-        return False
-
-    if notification.get("read"):
-        return False
-
-    if notification.get("notification_type") not in {
-        NOTIFICATION_TYPES["replied"],
-        NOTIFICATION_TYPES["quoted"],
-        NOTIFICATION_TYPES["mentioned"],
-    }:
-        return False
-
-    if include_all_topics:
-        return True
-
-    if target_topic_id is None:
-        return True
-
-    return int(notification.get("topic_id") or -1) == int(target_topic_id)
-
-
-def fetch_topic_context(
-    client: ShuiyuanClient,
-    topic_id: int,
-    post_limit: int = 10,
-    text_limit: int = 800,
-) -> str:
-    topic = client.topic(topic_id)
-    title = topic.get("title")
-    posts = topic.get("post_stream", {}).get("posts", [])
-
-    lines = []
-    lines.append(f"标题: {title}")
-    lines.append(f"链接: {BASE_URL}/t/{topic_id}")
-    lines.append("=" * 100)
-
-    for post in posts[-post_limit:]:
-        username = post.get("username")
-        post_number = post.get("post_number")
-        created_at = post.get("created_at")
-        text = shorten(html_to_text(post.get("cooked", "")), text_limit)
-
-        lines.append("")
-        lines.append(f"#{post_number} {username} | {created_at}")
-        lines.append("-" * 80)
-        lines.append(text)
-
-    return "\n".join(lines)
-
-
-def build_reply_draft(
-    notification: dict,
-    context: str,
-    auto: bool = False,
-) -> str:
-    """
-    生成回复草稿。
-
-    如果接入 LLM，可以在这里调用：
-        draft = call_llm(notification, context)
-    但仍建议保留人工确认步骤（除非 --auto 模式）。
-    """
-    author = get_notification_author(notification)
-    post_number = notification.get("post_number")
-    type_name = notification_type_name(notification)
-
-    if auto:
-        # 自动回复模式：更自然的草稿
-        if type_name == "replied":
-            draft = f"@{author} 谢谢回复！🐰"
-        elif type_name == "quoted":
-            draft = f"@{author} 引用收到～"
-        elif type_name == "mentioned":
-            draft = f"@{author} 被 tag 了！有什么事？"
-        else:
-            draft = f"@{author} 你好呀～"
-        return draft
-    else:
-        # 人工确认模式
-        return f"@{author} 谢谢回复，我看到了。\n\n我这边再补充一下：\n\n"
-
-
 def send_reply_confirmed(
     client: ShuiyuanClient,
-    notification: dict,
+    post: dict,
+    topic_id: int,
     draft: str,
-    auto: bool = False,
-    retort_emoji: str | None = None,
-):
-    topic_id = notification.get("topic_id")
-    post_number = notification.get("post_number")
+    suggested_emoji: str = "",
+    auto: bool = True,
+) -> bool:
+    post_number = post.get("post_number")
+    author = post.get("username", "unknown")
+    post_id = post.get("id")
 
-    if not topic_id:
-        print("该通知没有 topic_id，无法回复。")
-        return False
-
-    print("\n检测到新回复 / 引用 / 提及：")
-    print("=" * 100)
-    print(f"通知 ID: {notification.get('id')}")
-    print(f"类型: {notification_type_name(notification)}")
-    print(f"作者: {get_notification_author(notification)}")
-    print(f"标题: {get_notification_title(notification)}")
-    print(f"链接: {notification_url(notification)}")
-    print("=" * 100)
+    print("\n" + "=" * 80)
+    print(f"楼层: #{post_number}  作者: @{author}")
+    print(f"链接: {BASE_URL}/t/{topic_id}/{post_number}")
+    print("=" * 80)
 
     if not auto:
         print("\n回复草稿：")
-        print("=" * 100)
+        print("-" * 80)
         print(draft)
-        print("=" * 100)
+        print("-" * 80)
 
-        edit = input("是否编辑草稿？输入 y 编辑，其他键直接进入确认：").strip().lower()
-
+        edit = input("是否编辑草稿？输入 y 编辑，其他键直接确认：").strip().lower()
         if edit == "y":
             print("请输入新的回复内容，输入 END 单独一行结束：")
             lines = []
@@ -267,212 +241,220 @@ def send_reply_confirmed(
                     break
                 lines.append(line)
             draft = "\n".join(lines).strip()
-
-        if not draft:
-            print("回复为空，已跳过。")
-            return False
+            if not draft:
+                print("回复为空，已跳过。")
+                return False
 
         if not confirm_or_cancel("确认发送这条回复吗？", "确认发送"):
-            print("已取消发送。")
+            print("已取消。")
             return False
     else:
         print(f"\n自动回复：{draft}")
 
-    data = {
+    data: dict = {
         "topic_id": int(topic_id),
         "raw": draft,
+        "reply_to_post_number": int(post_number),
     }
-
-    if post_number:
-        data["reply_to_post_number"] = int(post_number)
-
     result = client.post("/posts.json", data=data)
-
     print("回复已发送：")
-    print(json.dumps(result, ensure_ascii=False, indent=2)[:2000])
+    print(json.dumps(result, ensure_ascii=False, indent=2)[:1000])
 
-    # 记录已回复的楼层
-    if post_number:
-        state = load_state()
-        replied = state.get("replied_post_numbers", [])
-        if post_number not in replied:
-            replied.append(int(post_number))
-            state["replied_post_numbers"] = replied
-            save_state(state)
-
-    # 自动贴表情
-    if retort_emoji:
+    # 贴表情
+    if suggested_emoji and post_id:
         try:
-            new_post_id = result.get("id")
-            if new_post_id:
-                client.retort_post(new_post_id, retort_emoji)
-                print(f"已贴表情: {retort_emoji}")
+            client.retort_post(int(post_id), suggested_emoji)
+            print(f"已贴表情 :{suggested_emoji}:")
         except Exception as e:
-            print(f"贴表情失败: {e}")
+            err_msg = str(e)
+            if "HTTP" in err_msg:
+                err_msg = err_msg.split("HTTP")[0].strip()
+            print(f"贴表情失败：{err_msg[:100]}")
 
     return True
 
 
+# ─── 发帖（可选，首次建帖后监听） ─────────────────────────────────────────────
+
+def create_topic_confirmed(
+    client: ShuiyuanClient,
+    title: str,
+    raw: str,
+    category_id: int,
+) -> int:
+    print("\n即将发布主题：")
+    print("=" * 80)
+    print(f"标题: {title}  分类 ID: {category_id}")
+    print("-" * 80)
+    print(raw)
+    print("=" * 80)
+    if not confirm_or_cancel("确认发布？", "确认发帖"):
+        raise RuntimeError("已取消发帖。")
+    result = client.create_topic(title=title, raw=raw, category_id=category_id)
+    topic_id = result.get("topic_id") or result.get("id")
+    if not topic_id:
+        raise RuntimeError("发帖成功但未解析到 topic_id。")
+    print(f"主题已发布: {BASE_URL}/t/{int(topic_id)}")
+    return int(topic_id)
+
+
+# ─── main ─────────────────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser(
-        description="发帖 → 监听回复 → 草稿回复 → 人工确认发送 的安全自动化流程"
+        description="直接轮询帖子列表，回复所有未回复的新楼层"
     )
-
-    parser.add_argument("--title", help="要发布的新主题标题")
-    parser.add_argument("--category", type=int, help="分类 ID")
-    parser.add_argument("--post-file", help="新主题正文 Markdown 文件")
-
+    parser.add_argument("--topic-id", type=int, help="监听的 topic ID")
+    parser.add_argument("--title", help="新帖标题（可选，先发帖再监听）")
+    parser.add_argument("--category", type=int, help="新帖分类 ID")
+    parser.add_argument("--post-file", help="新帖正文 Markdown 文件")
     parser.add_argument(
-        "--topic-id",
-        type=int,
-        help="不发新帖，直接监听已有 topic_id",
-    )
-
-    parser.add_argument(
-        "--all-topics",
+        "--skip-existing",
         action="store_true",
-        help="监听所有回复/引用/提及，而不是只监听当前 topic",
+        help="首次运行跳过已有楼层，只处理启动后的新楼层",
     )
-
-    parser.add_argument(
-        "--interval",
-        type=int,
-        default=180,
-        help="轮询间隔秒数，最低 60",
-    )
-
-    parser.add_argument(
-        "--max-replies-per-run",
-        type=int,
-        default=5,
-        help="本次运行最多回复几条，避免误操作",
-    )
-
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="只检查一次，不循环",
-    )
-
-    parser.add_argument(
-        "--auto",
-        action="store_true",
-        default=True,
-        help="自动回复，不询问确认（默认开启）",
-    )
-
-    parser.add_argument(
-        "--no-auto",
-        action="store_true",
-        help="关闭自动回复，需要人工确认",
-    )
-
-    parser.add_argument(
-        "--retort",
-        help="回复后自动贴的表情（如 heart, like）",
-    )
-
+    parser.add_argument("--interval", type=int, default=180, help="轮询间隔秒数（最低 60）")
+    parser.add_argument("--max-replies-per-run", type=int, default=5, help="本次最多回复几条")
+    parser.add_argument("--once", action="store_true", help="只检查一次")
+    parser.add_argument("--auto", action="store_true", default=True, help="自动回复，不询问确认（默认开启）")
+    parser.add_argument("--no-auto", action="store_true", help="关闭自动回复，需要人工确认")
+    parser.add_argument("--retort", help="回复后自动贴的表情（如 heart, like）")
     args = parser.parse_args()
 
     if args.no_auto:
         args.auto = False
-    else:
-        args.auto = True
 
     interval = max(args.interval, 60)
-
     client = ShuiyuanClient()
     state = load_state()
 
-    # 1. 确定 topic_id：新发帖，或监听已有主题，或恢复上次状态。
-    topic_id = args.topic_id or state.get("topic_id")
+    # 1. 确定 topic_id
+    topic_id: int | None = args.topic_id or state.get("topic_id")
 
     if args.title and args.category and args.post_file:
         raw = Path(args.post_file).read_text(encoding="utf-8").strip()
-
         if not raw:
             raise ValueError("post-file 内容为空。")
-
         topic_id = create_topic_confirmed(
-            client=client,
-            title=args.title,
-            raw=raw,
-            category_id=args.category,
+            client=client, title=args.title, raw=raw, category_id=args.category
         )
-
         state["topic_id"] = topic_id
         save_state(state)
 
-    if not topic_id and not args.all_topics:
-        raise ValueError(
-            "没有 topic_id。请用 --topic-id 监听已有主题，"
-            "或用 --title --category --post-file 先发帖，"
-            "或加 --all-topics 监听所有通知。"
-        )
+    if not topic_id:
+        raise ValueError("请用 --topic-id 指定要监听的主题 ID。")
 
-    print("\n工作流启动。")
-    if topic_id:
-        print(f"监听主题: {BASE_URL}/t/{topic_id}")
-    if args.all_topics:
-        print("监听范围: 所有回复 / 引用 / 提及")
+    # 2. 获取自己的用户名（防止自我回复）
+    my_username = get_my_username(client)
+    print(f"当前用户: @{my_username or '（未获取到）'}")
+    print(f"监听主题: {BASE_URL}/t/{topic_id}")
     print(f"轮询间隔: {interval} 秒")
-    print("按 Ctrl+C 停止。")
 
-    # 2. loop 检查回复。
+    # 3. 首次运行：--skip-existing 则把当前最大楼层号记入 state，跳过已有内容
+    key = str(topic_id)
+    if key not in state["last_seen_post_numbers"] or state["last_seen_post_numbers"][key] == 0:
+        if args.skip_existing:
+            topic_data = client.topic(topic_id)
+            stream = topic_data.get("post_stream", {}).get("stream", [])
+            posts_loaded = topic_data.get("post_stream", {}).get("posts", [])
+            if posts_loaded:
+                current_max = max(p.get("post_number", 0) for p in posts_loaded)
+                last_ids = stream[-5:] if len(stream) >= 5 else stream
+                missing = [pid for pid in last_ids if pid not in {p["id"]: p for p in posts_loaded}]
+                if missing:
+                    chunk = client.topic_posts_chunk(topic_id, last_ids)
+                    extra = chunk.get("post_stream", {}).get("posts") or chunk.get("posts") or []
+                    if extra:
+                        current_max = max(p.get("post_number", 0) for p in extra)
+                state["last_seen_post_numbers"][key] = current_max
+                save_state(state)
+                print(f"--skip-existing：跳过已有楼层，从 #{current_max} 之后开始监听。")
+
+    print("按 Ctrl+C 停止。\n")
+
     while True:
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print("\n" + "-" * 100)
+            print("-" * 80)
             print(f"检查时间: {now}")
 
-            seen_ids = {int(x) for x in state.get("seen_notification_ids", [])}
-            sent_reply_count = int(state.get("sent_reply_count", 0))
+            last_seen = int(state["last_seen_post_numbers"].get(key, 0))
+            replied_ids = set(state.get("replied_post_ids", []))
+            sent_count = int(state.get("sent_reply_count", 0))
 
-            notifications = get_notifications(client)
+            new_posts, max_pnum = fetch_new_posts(
+                client=client,
+                topic_id=topic_id,
+                last_seen_post_number=last_seen,
+                my_username=my_username,
+                replied_ids=replied_ids,
+            )
 
-            candidates = [
-                n for n in notifications
-                if should_handle_notification(
-                    notification=n,
-                    target_topic_id=topic_id,
-                    seen_ids=seen_ids,
-                    include_all_topics=args.all_topics,
-                )
-            ]
-
-            if not candidates:
-                print("没有新的回复 / 引用 / 提及。")
-            else:
-                print(f"发现 {len(candidates)} 条新通知。")
-
-            for n in candidates:
-                if sent_reply_count >= args.max_replies_per_run:
-                    print("已达到本次运行最大回复数，停止处理更多通知。")
-                    break
-
-                n_topic_id = int(n.get("topic_id"))
-                context = fetch_topic_context(client, n_topic_id)
-                print("\n最近上下文：")
-                print(context)
-
-                draft = build_reply_draft(n, context, auto=args.auto)
-
-                sent = send_reply_confirmed(
-                    client=client,
-                    notification=n,
-                    draft=draft,
-                    auto=args.auto,
-                    retort_emoji=args.retort,
-                )
-
-                seen_ids.add(int(n["id"]))
-
-                if sent:
-                    sent_reply_count += 1
-
-                state["seen_notification_ids"] = sorted(seen_ids)
-                state["sent_reply_count"] = sent_reply_count
+            # 更新最大楼层号（即使没有需要回复的帖子也要推进）
+            if max_pnum > last_seen:
+                state["last_seen_post_numbers"][key] = max_pnum
                 save_state(state)
+
+            if not new_posts:
+                print(f"没有新楼层（当前最高楼: #{max_pnum}）。")
+            else:
+                print(f"发现 {len(new_posts)} 个未回复的新楼层。")
+
+                for post in new_posts:
+                    if sent_count >= args.max_replies_per_run:
+                        print("已达到本次最大回复数，停止。")
+                        break
+
+                    pnum = post.get("post_number", 0)
+                    pkey = post_key(topic_id, pnum)
+
+                    # 构建上下文
+                    context = build_context(
+                        client=client,
+                        topic_id=topic_id,
+                        around_post_number=pnum,
+                    )
+                    print("\n上下文：")
+                    print(context)
+
+                    # 生成草稿
+                    should_reply, draft, suggested_emoji = build_reply_draft(post, context)
+                    if args.retort and not suggested_emoji:
+                        suggested_emoji = args.retort
+
+                    # LLM 决定跳过或返回空
+                    if not should_reply:
+                        replied_ids.add(pkey)
+                        state["replied_post_ids"] = sorted(replied_ids)
+                        save_state(state)
+                        continue
+
+                    if not draft:
+                        print("[AI] 生成的回复为空，跳过此楼层")
+                        replied_ids.add(pkey)
+                        state["replied_post_ids"] = sorted(replied_ids)
+                        save_state(state)
+                        continue
+
+                    # 确认发送
+                    sent = send_reply_confirmed(
+                        client=client,
+                        post=post,
+                        topic_id=topic_id,
+                        draft=draft,
+                        suggested_emoji=suggested_emoji,
+                        auto=args.auto,
+                    )
+
+                    # 无论是否发送，都标记这个楼层为已处理（防止下轮重复询问）
+                    replied_ids.add(pkey)
+                    state["replied_post_ids"] = sorted(replied_ids)
+
+                    if sent:
+                        sent_count += 1
+                        state["sent_reply_count"] = sent_count
+
+                    save_state(state)
 
             if args.once:
                 break
@@ -480,9 +462,8 @@ def main():
         except KeyboardInterrupt:
             print("\n已停止。")
             break
-
         except Exception as e:
-            print(f"流程出错: {e}")
+            print(f"出错: {e}")
 
         time.sleep(interval)
 

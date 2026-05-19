@@ -344,7 +344,14 @@ def main():
     parser.add_argument(
         "--auto",
         action="store_true",
-        help="自动回复，不询问确认（跳过人工确认）",
+        default=True,
+        help="自动回复，不询问确认（默认开启）",
+    )
+
+    parser.add_argument(
+        "--no-auto",
+        action="store_true",
+        help="关闭自动回复，需要人工确认",
     )
 
     parser.add_argument(
@@ -353,6 +360,11 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.no_auto:
+        args.auto = False
+    else:
+        args.auto = True
 
     interval = max(args.interval, 60)
 

@@ -70,9 +70,9 @@ def notification_url(notification: dict) -> str | None:
         return None
 
     if post_number:
-        return f"{BASE_URL}/t/topic/{topic_id}/{post_number}"
+        return f"{BASE_URL}/t/{topic_id}/{post_number}"
 
-    return f"{BASE_URL}/t/topic/{topic_id}"
+    return f"{BASE_URL}/t/{topic_id}"
 
 
 def print_notification(notification: dict):
@@ -125,7 +125,7 @@ def reply_to_notification(client: ShuiyuanClient, notification: dict):
     print("=" * 100)
     print(raw)
     print("=" * 100)
-    print(f"目标主题: {BASE_URL}/t/topic/{topic_id}")
+    print(f"目标主题: {BASE_URL}/t/{topic_id}")
     if post_number:
         print(f"针对楼层: #{post_number}")
     print(f"对方用户: {author}")

@@ -15,6 +15,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import requests
 
+
+from env_loader import load_env
+load_env()
+
 from auth.user_api_key_auth import load_key as load_user_api_key
 from auth.manual_cookie_auth import load_cookie as load_manual_cookie
 
@@ -275,21 +279,37 @@ class ShuiyuanClient:
         csrf = self.get_csrf_token()
         url = self.url(f"/retorts/{post_id}")
 
-        if remove:
-            r = self.session.delete(
-                url,
-                headers={"X-CSRF-Token": csrf, "Content-Type": "application/json"},
-                data=_json.dumps(data),
-                timeout=30,
-            )
-        else:
-            r = self.session.put(
-                url,
-                headers={"X-CSRF-Token": csrf, "Content-Type": "application/json"},
-                data=_json.dumps(data),
-                timeout=30,
-            )
-        return self._handle_response(r)
+        # 暂时移除 User-Api-Key header（retort 不支持该认证方式）
+        api_key = self.session.headers.pop("User-Api-Key", None)
+        client_id = self.session.headers.pop("User-Api-Client-Id", None)
+
+        retort_headers = {
+            "X-CSRF-Token": csrf,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        try:
+            if remove:
+                r = self.session.delete(
+                    url,
+                    headers=retort_headers,
+                    data=_json.dumps(data),
+                    timeout=30,
+                )
+            else:
+                r = self.session.put(
+                    url,
+                    headers=retort_headers,
+                    data=_json.dumps(data),
+                    timeout=30,
+                )
+            return self._handle_response(r)
+        finally:
+            # 恢复 User-Api-Key header
+            if api_key:
+                self.session.headers["User-Api-Key"] = api_key
+            if client_id:
+                self.session.headers["User-Api-Client-Id"] = client_id
 
     def delete_post(self, post_id: int):
         """删除回复"""

@@ -35,7 +35,7 @@ dev = [
 ]
 
 [project.scripts]
-shuiyuan = "shuiyuan_client:ShuiyuanClient"
+shuiyuan = "agent:main"
 
 [build-system]
 requires = ["hatchling"]

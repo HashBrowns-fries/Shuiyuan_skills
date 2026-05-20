@@ -23,9 +23,6 @@ STATE_FILE = Path("./conversation_loop_state.json")
 def load_state() -> dict:
     defaults = {
         "topic_id": None,
-        "last_seen_post_numbers": {},   # {str(topic_id): int(post_number)}
-        "replied_post_ids": [],          # ["topic_id:post_number", ...]
-        "sent_reply_count": 0,
     }
     if not STATE_FILE.exists():
         return defaults
@@ -33,6 +30,9 @@ def load_state() -> dict:
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         for k, v in defaults.items():
             state.setdefault(k, v)
+        # 清理旧版死字段
+        state.pop("last_seen_post_numbers", None)
+        state.pop("replied_post_ids", None)
         return state
     except Exception:
         return defaults
@@ -44,9 +44,6 @@ def save_state(state: dict):
         encoding="utf-8",
     )
 
-
-def post_key(topic_id: int, post_number: int) -> str:
-    return f"{topic_id}:{post_number}"
 
 
 # ─── 用户身份 ──────────────────────────────────────────────────────────────────
@@ -65,14 +62,14 @@ def fetch_new_posts(
     client: ShuiyuanClient,
     topic_id: int,
     my_username: str,
+    all_posts: list[dict] | None = None,
 ) -> list[dict]:
     """
     拉取所有帖子，返回那些还没被当前用户回复过的楼层。
     通过检查论坛上是否有 reply_to_post_number 指向该楼层的回帖来判断。
     不依赖 state 文件，直接查看论坛实际数据。
     """
-    # 获取完整 topic 数据
-    posts = client.topic_posts_all(topic_id, limit=200)
+    posts = all_posts or client.topic_posts_all(topic_id, limit=200)
 
     # 找出哪些楼层已被我回复
     replied_post_numbers: set[int] = set()
@@ -82,14 +79,25 @@ def fetch_new_posts(
             if rtp:
                 replied_post_numbers.add(rtp)
 
-    # 筛选值得回复的楼层：不是自己的、没有被回复过的
+    # 筛值得回复的楼层：不是自己的、没被回复过的、未被删除的
     new_posts = [
         p for p in posts
         if p.get("username") != my_username
         and p.get("post_number", 0) not in replied_post_numbers
+        and not _is_deleted(p)
     ]
 
     return new_posts
+
+
+def _is_deleted(post: dict) -> bool:
+    """判断帖子是否已被删除（作者删除或管理员删除）。"""
+    if post.get("deleted_at") or post.get("post_deleted"):
+        return True
+    cooked = post.get("cooked", "")
+    if "（帖子已被作者删除）" in cooked:
+        return True
+    return False
 
 
 # ─── 上下文拼装 ───────────────────────────────────────────────────────────────
@@ -98,50 +106,66 @@ def build_context(
     client: ShuiyuanClient,
     topic_id: int,
     around_post_number: int,
-    window: int = 6,
+    all_posts: list[dict] | None = None,
+    window: int = 8,
     text_limit: int = 600,
 ) -> str:
     """
-    拉取 around_post_number 附近若干楼，拼成供 AI 阅读的上下文字符串。
+    围绕 around_post_number 取前后各 window/2 楼，拼成上下文。
+    all_posts 传入全量帖子列表时直接从内存构建，无需额外 API 调用。
     """
+    if all_posts:
+        return _build_context_from_posts(
+            all_posts, topic_id, around_post_number, window, text_limit
+        )
+
+    # 回退：通过 API 获取（用于没有 all_posts 的调用方）
     topic_data = client.topic(topic_id)
     title = topic_data.get("title", "")
-    stream_ids: list[int] = topic_data.get("post_stream", {}).get("stream", [])
-    loaded: dict[int, dict] = {
-        p["id"]: p
-        for p in topic_data.get("post_stream", {}).get("posts", [])
-        if p.get("id")
-    }
+    posts = client.topic_posts_all(topic_id, limit=200)
+    return _build_context_from_posts(posts, topic_id, around_post_number, window, text_limit, title=title)
 
-    # 找到目标楼在 stream 中的位置，取前后各 window/2 个 ID
-    target_ids_near: list[int] = []
-    for i, pid in enumerate(stream_ids):
-        p = loaded.get(pid)
-        if p and p.get("post_number") == around_post_number:
-            start = max(0, i - window // 2)
-            end = min(len(stream_ids), i + window // 2 + 1)
-            target_ids_near = stream_ids[start:end]
+
+def _build_context_from_posts(
+    posts: list[dict],
+    topic_id: int,
+    around_post_number: int,
+    window: int = 8,
+    text_limit: int = 600,
+    title: str = "",
+) -> str:
+    """从已加载的帖子列表中围绕目标楼层构建上下文。"""
+    # 按 post_number 排序
+    sorted_posts = sorted(posts, key=lambda p: p.get("post_number", 0))
+
+    # 提取标题（从 #1 楼）
+    if not title:
+        for p in sorted_posts:
+            if p.get("post_number") == 1:
+                title = html_to_text(p.get("cooked", "")).split("\n")[0][:100]
+                break
+
+    # 找目标楼在 sorted_posts 中的索引
+    target_idx = 0
+    for i, p in enumerate(sorted_posts):
+        if p.get("post_number") == around_post_number:
+            target_idx = i
             break
-    if not target_ids_near:
-        target_ids_near = stream_ids[-window:]
+    else:
+        # 找不到精确匹配，找最接近的
+        best_idx = 0
+        best_dist = 10**9
+        for i, p in enumerate(sorted_posts):
+            dist = abs(p.get("post_number", 10**9) - around_post_number)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+        target_idx = best_idx
 
-    # 补拉缺失
-    missing = [pid for pid in target_ids_near if pid not in loaded]
-    if missing:
-        chunk = client.topic_posts_chunk(topic_id, missing)
-        extra = (
-            chunk.get("post_stream", {}).get("posts")
-            or chunk.get("posts")
-            or []
-        )
-        for p in extra:
-            if p.get("id"):
-                loaded[p["id"]] = p
-
-    window_posts = sorted(
-        [loaded[pid] for pid in target_ids_near if pid in loaded],
-        key=lambda p: p.get("post_number", 0),
-    )
+    half = window // 2
+    start = max(0, target_idx - half)
+    end = min(len(sorted_posts), target_idx + half + 1)
+    window_posts = sorted_posts[start:end]
 
     lines = [f"标题: {title}", f"链接: {BASE_URL}/t/{topic_id}", "=" * 80]
     for p in window_posts:
@@ -149,7 +173,7 @@ def build_context(
         username = p.get("username")
         created = p.get("created_at", "")
         text = shorten(html_to_text(p.get("cooked", "")), text_limit)
-        marker = " ◀ 新楼层" if pnum == around_post_number else ""
+        marker = " ◀◀ 目标" if pnum == around_post_number else ""
         lines.append(f"\n#{pnum} @{username} | {created}{marker}")
         lines.append("-" * 60)
         lines.append(text)
@@ -233,8 +257,9 @@ def send_reply_confirmed(
     data: dict = {
         "topic_id": int(topic_id),
         "raw": draft,
-        "reply_to_post_number": int(post_number),
     }
+    if post_number is not None:
+        data["reply_to_post_number"] = int(post_number)
     result = client.post("/posts.json", data=data)
     print("回复已发送：")
     print(json.dumps(result, ensure_ascii=False, indent=2)[:1000])
@@ -329,11 +354,9 @@ def main():
     print(f"监听主题: {BASE_URL}/t/{topic_id}")
     print(f"轮询间隔: {interval} 秒")
 
-    # 3. --skip-existing：首次运行跳过已有楼层
+    # 3. --skip-existing：论坛过滤已自动处理，仅打印提示
     if args.skip_existing:
-        print("--skip-existing：扫描当前所有楼层，跳过已有回复...")
-        fetch_new_posts(client, topic_id, my_username)  # 先跑一次确认已完成回复的不会重复处理
-        print("--skip-existing：初始化完成。")
+        print("--skip-existing：基于论坛 reply_to_post_number 自动过滤已有回复，无需手动干预。")
 
     print("按 Ctrl+C 停止。\n")
 
@@ -343,13 +366,15 @@ def main():
             print("-" * 80)
             print(f"检查时间: {now}")
 
-            sent_count = int(state.get("sent_reply_count", 0))
+            sent_count = 0
 
-            # 直接检查论坛上哪些楼层没有被回复
+            # 一次拉取全量帖子，供过滤和上下文共用
+            all_posts = client.topic_posts_all(topic_id, limit=200)
             new_posts = fetch_new_posts(
                 client=client,
                 topic_id=topic_id,
                 my_username=my_username,
+                all_posts=all_posts,
             )
 
             if not new_posts:
@@ -366,11 +391,12 @@ def main():
 
                     pnum = post.get("post_number", 0)
 
-                    # 构建上下文
+                    # 构建上下文（使用全量帖子，精准定位目标楼）
                     context = build_context(
                         client=client,
                         topic_id=topic_id,
                         around_post_number=pnum,
+                        all_posts=all_posts,
                     )
                     print("\n上下文：")
                     print(context)
@@ -401,7 +427,6 @@ def main():
 
                     if sent:
                         sent_count += 1
-                        state["sent_reply_count"] = sent_count
 
                     save_state(state)
 
